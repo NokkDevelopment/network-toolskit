@@ -239,9 +239,193 @@ def dns_test():
     except socket.gaierror:
         return False
 
+def get_wifi_details():
+    wifi_output = run_command(["iw","dev","wlan0","link"])
+
+    if wifi_output.startswith("Not connected."):
+        return{
+            "connected": False,
+            "ssid": None,
+            "frequency": None,
+            "band": None,
+            "channel": None,
+            "signal": None,
+            "signal_grade": None,
+            "tx_bitrate": None,
+            "tx_status": None,
+            "rx_bitrate": None
+        }
+
+    ssid_match = re.search(r"SSID:\s*(.+)",wifi_output)
+    
+    freq_match = re.search(r"freq:\s*(\d+)",wifi_output)
+    frequency = int(freq_match.group(1)) if freq_match else None
+    band = get_wifi_band(frequency)
+    channel = get_wifi_channel(frequency)
+
+    signal_match = re.search(r"signal:\s*(-?\d+)",wifi_output)
+    signal = float(signal_match.group(1)) if signal_match else None
+    signal_grade = get_signal_grade(signal)
+
+    tx_match = re.search(r"tx bitrate:\s*([\d.]+)",wifi_output)
+    tx_bitrate = float(tx_match.group(1)) if tx_match else None
+    tx_status = get_tx_status(tx_bitrate)
+
+    rx_match = re.search(r"rx bitrate:\s*([\d.]+)",wifi_output)
+    rx_bitrate = float(rx_match.group(1)) if rx_match else None
+
+    return{
+        "connected": bool(ssid_match),
+        "ssid": str(ssid_match.group(1).strip()) if ssid_match else None,
+        "frequency": frequency,
+        "band": band,
+        "channel": channel,
+        "signal": signal,
+        "signal_grade": signal_grade,
+        "tx_bitrate": tx_bitrate,
+        "tx_status": tx_status,
+        "rx_bitrate": rx_bitrate
+    }
+
+def get_wifi_band(frequency):
+
+    if frequency is None:
+        return "Unknown"
+
+    if 2400 <= frequency <= 2500:
+        return "2.4Ghz"
+    elif 5000 <= frequency <= 5925:
+        return "5Ghz"
+    elif 5925<= frequency <= 7125:
+        return "6Ghz"
+
+    else:
+        return "Unknown"
+
+def get_wifi_channel(frequency):
+
+    if frequency is None:
+        return None
+
+    if 2412 <= frequency <= 2472:
+        if (frequency - 2412) % 5 == 0:
+            return (frequency - 2407) // 5
+
+    elif frequency == 2484:
+        return 14
+
+    elif 5000 <= frequency < 5925:
+        if (frequency - 5000) % 5 == 0:
+            return (frequency - 5000) // 5
+
+    return None
+
+def get_signal_grade(signal):
+
+    if signal is None:
+        return "Unknown"
+
+    if signal >= -50:
+        return "极好 Excellent"
+
+    elif signal >= -60:
+        return "好 Good"
+
+    elif signal >= -70:
+        return "较好 Fair"
+
+    elif signal >= -80:
+        return "弱 Weak"
+
+    else:
+        return "差 Poor"
+
+def get_tx_status(tx_bitrate):
+
+    if tx_bitrate is None:
+        return "Unknown"
+
+    elif tx_bitrate <= 0:
+        return "Invalid"
+
+    else:
+        return "Available"
+
+def diagnose_wifi(wifi, gateway_ping):
+
+    issues = []
+    notes = []
+
+    # 1. Check Wi-Fi connection
+    if not wifi.get("connected", False):
+        issues.append("Wi-Fi is disconnected")
+
+        return {
+            "status": "Disconnected",
+            "issues": issues,
+            "notes": notes
+        }
+
+    # 2. Check signal strength
+    signal = wifi.get("signal")
+
+    if signal is None:
+        notes.append("Wi-Fi signal is unavailable")
+
+    elif signal < -80:
+        issues.append("Very weak Wi-Fi signal")
+
+    elif signal < -70:
+        issues.append("Weak Wi-Fi signal")
+
+    # 3. Check TX / RX bitrate availability
+    tx = wifi.get("tx_bitrate")
+    rx = wifi.get("rx_bitrate")
+
+    if tx is None:
+        notes.append("TX bitrate is unavailable")
+    elif tx <= 0:
+        issues.append("Invalid TX bitrate")
+
+    if rx is None:
+        notes.append("RX bitrate is unavailable")
+    elif rx <= 0:
+        issues.append("Invalid RX bitrate")
+
+    # 4. Check gateway Ping
+    if gateway_ping is None:
+        notes.append("Gateway Ping was not performed")
+
+    elif gateway_ping.get("error"):
+        notes.append("Gateway Ping test error: " + str(gateway_ping["error"]))
+
+    else:
+        loss = gateway_ping.get("packet_loss")
+
+        if loss is None:
+            notes.append("Gateway packet loss is unavailable")
+
+        elif loss == 100:
+            issues.append("Gateway did not respond")
+
+        elif loss > 0:
+            issues.append("Gateway packet loss detected")
+
+    # 5. Determine overall status
+    if issues:
+        status = "Warning"
+    else:
+        status = "OK"
+
+    return {
+        "status": status,
+        "issues": issues,
+        "notes": notes
+    }
+    
 def main():
     print("="*45)
-    print("     uConsole Network Toolkit v0.2")
+    print("     uConsole Network Toolkit v0.3")
     print("="*45)
 
     # --------------------------------------------------------
@@ -272,15 +456,15 @@ def main():
     # 3. Wi-Fi 信息
     # --------------------------------------------------------
 
-    wifi = get_wifi_info(interface)
+    wifi = get_wifi_details()
 
     if wifi:
         print()
-        print("[Wi-Fi]")
+        print("[Wi-Fi Diagnostics]")
 
         for key, value in wifi.items():
 
-            print(f"{key:<10}:{value}")
+            print(f"{key:<15}:{value}")
 
     # --------------------------------------------------------
     # 4. Ping 测试
@@ -290,7 +474,7 @@ def main():
     # 测试网关
     gateway_ping = None
 
-    if gateway_ping != "Unknow":
+    if gateway_ping != "Unknown":
         gateway_ping = ping_test(gateway)
 
     # 互联网测试
@@ -300,15 +484,17 @@ def main():
     dns_ok = dns_test()
 
     # 连通性测试
-    internet_ok = ping_test("1.1.1.1")
+    internet_ok = internet_ping["success"]
 
     # 提取连通性状态
     gateway_ok = (
         gateway_ping["success"]
         if gateway_ping is not None
         else False
-        )
-    
+    )
+
+    internet_ok = internet_ping["success"]
+
     print()
     print("[Connectivity]")
 
@@ -318,9 +504,8 @@ def main():
         print(f"Gateway     : {'OK' if gateway_ok else 'FAIL'}")
 
     print(f"Internet    : {'OK' if internet_ok else 'FAIL'}")
-
     print(f"DNS         : {'OK' if dns_ok else 'FAIL'}")
-
+   
     # --------------------------------------------------------
     # 6. 显示 Ping 统计
     # --------------------------------------------------------
@@ -364,7 +549,13 @@ def main():
     ):
         print("Internet packet loss detected.")
 
-    elif dns_ok:
+    if (
+        gateway_ok
+        and internet_ok
+        and dns_ok
+        and gateway_ping["packet_loss"] == 0
+        and internet_ping["packet_loss"] == 0
+    ):
         print("Basic Ping and DNS checks passed.")
 
     # DNS 诊断
@@ -379,6 +570,21 @@ def main():
         and internet_ping["avg"] >= 150
     ):
         print("High average RTT detected (>=150 ms).")
+
+# --------------------------------------------------------
+# 8. Wi-Fi 综合诊断
+# --------------------------------------------------------
+    wifi_diagnosis = diagnose_wifi(wifi, gateway_ping)
+
+    print()
+    print("[Wi-Fi Diagnosis]")
+    print(f"Status : {wifi_diagnosis['status']}")
+
+    for issue in wifi_diagnosis["issues"]:
+        print(f"Issue  : {issue}")
+
+    for note in wifi_diagnosis["notes"]:
+        print(f"Note   : {note}")
 
     print()
     print("=" * 45)
